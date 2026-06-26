@@ -39,7 +39,6 @@ if st.sidebar.button("Run Spectral Optimization", type="primary"):
     dist_matrix = cdist(true_coords, true_coords)
     
     # 2. Run Bourgain MDS Metric Embedding
-    # Using the safe 0.35 padding factor validated in testing
     embedding = BourgainMDSEmbedding(dimensions=dimensions, padding_factor=0.35)
     with st.spinner("Computing Isotropic Metric Embedding..."):
         coords_grid = embedding.fit_transform(dist_matrix, grid_res=grid_res)
@@ -104,17 +103,30 @@ if st.sidebar.button("Run Spectral Optimization", type="primary"):
     with layout_col1:
         st.write("### Geodesic Distance Field Visualization")
         try:
-            # Reconstruct and slice a 2D plane for visual output
-            phi_dense = phi_tt.to_dense()
             slice_z = int(round(coords_grid[source_city_idx, 2])) if dimensions >= 3 else 0
             
-            # Select slice based on dimensions
             if dimensions >= 3:
-                phi_slice = phi_dense[:, :, slice_z]
-                for _ in range(3, dimensions):
-                    phi_slice = phi_slice[...] # Keep indexing clean
+                # Extrai a fatia 2D diretamente dos núcleos do Trem de Tensores de forma nativa e ultra-rápida (Z = slice_z)
+                fixed_coords = [int(round(coords_grid[source_city_idx, k])) for k in range(dimensions)]
+                fixed_coords[2] = slice_z # Garante a fatia no nível Z do ponto de origem
+                
+                # Multiplica todos os eixos fixados da direita para a esquerda (k >= 2)
+                v_right = phi_tt.cores[-1][:, fixed_coords[-1], :]  # shape: (r_{d-1}, 1)
+                for k in range(dimensions - 2, 1, -1):
+                    core_val = phi_tt.cores[k][:, fixed_coords[k], :]  # shape: (r_k, r_{k+1})
+                    v_right = core_val @ v_right  # shape: (r_{k-1}, 1)
+                
+                v_right = v_right.squeeze(axis=1)  # shape: (r_1,)
+                
+                # Contrai o núcleo do segundo eixo (Y) com o vetor direito consolidado
+                C1 = phi_tt.cores[1]  # shape: (r_1, N_g, r_2)
+                C1_reduced = np.tensordot(C1, v_right, axes=(2, 0))  # shape: (r_1, N_g)
+                
+                # Multiplica o núcleo do primeiro eixo (X) com a representação contraída de Y
+                C0 = phi_tt.cores[0][0, :, :]  # shape: (N_g, r_1)
+                phi_slice = C0 @ C1_reduced  # shape: (N_g, N_g)
             else:
-                phi_slice = phi_dense
+                phi_slice = phi_tt.to_dense()
                 
             x_grid = np.arange(grid_res)
             y_grid = np.arange(grid_res)
