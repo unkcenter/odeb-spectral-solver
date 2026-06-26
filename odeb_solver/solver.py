@@ -93,7 +93,7 @@ class TensorTrain:
         """
         new_cores = []
         for core in self.cores:
-            idct_core = sfft.idct(idct_core, axis=1, norm='ortho') if 'idct_core' in globals() else sfft.idct(core, axis=1, norm='ortho')
+            idct_core = sfft.idct(core, axis=1, norm='ortho')
             new_cores.append(idct_core)
         return TensorTrain(new_cores)
 
@@ -189,7 +189,8 @@ class SpectralHeatSolverND:
         Solves d-dimensional heat flow and Poisson equations using Sinc quadratures
         and Tensor Train operations. Returns a compressed TensorTrain object.
         """
-        # --- PASSO A: DIFUSÃO TÉRMICA VIA SINC QUADRATURA (ESA) ---
+        # --- STEP A: THERMAL DIFFUSION VIA SINC QUADRATURE (ESA) ---
+        # Discretization of Hackbusch's 1/x integral to solve heat flow separably
         h_sinc = 0.4
         M_sinc = 12
         quad_nodes = np.exp(np.arange(-M_sinc, M_sinc + 1) * h_sinc)
@@ -200,12 +201,14 @@ class SpectralHeatSolverND:
             w_j = quad_weights[j]
             s_j = quad_nodes[j]
             
+            # Construct rank-1 cores for each of the d dimensions
             cores_1d = []
             for d_idx in range(self.dimensions):
                 delta_1d = np.zeros(self.grid_res)
                 idx = int(round(source_coord[d_idx]))
                 delta_1d[idx] = 1.0
                 
+                # Solving 1D spectral heat diffusion damped by Sinc quadrature
                 hat_delta_1d = sfft.dct(delta_1d, norm='ortho')
                 hat_u_1d = hat_delta_1d * np.exp(s_j * self.t * self.laplacian_eigenvalues_1d)
                 u_1d = sfft.idct(hat_u_1d, norm='ortho')
@@ -215,27 +218,31 @@ class SpectralHeatSolverND:
             u_tt = term_tt if u_tt is None else u_tt + term_tt
             
         u_tt = u_tt.round(eps=self.eps, max_rank=self.max_rank)
-        u_dense = u_tt.to_dense()  
+        u_dense = u_tt.to_dense()  # Reconstruction for local operations on moderate grids
         u_dense = np.maximum(u_dense, 1e-15)
         
-        # --- PASSO B: EXTRAÇÃO E NORMALIZAÇÃO DO GRADIENTE ESPACIAL ---
+        # --- STEP B: SPATIAL GRADIENT EXTRACTION AND NORMALIZATION ---
+        # Partial gradients along each of the d dimensions
         gradients = np.gradient(u_dense)
         grad_norm = np.zeros_like(u_dense)
         for g in gradients:
             grad_norm += g**2
         grad_norm = np.sqrt(grad_norm + 1e-15)
         
+        # Unit phase director vectors
         X = [-g / grad_norm for g in gradients]
         
-        # --- PASSO C: DIVERGÊNCIA ESPACIAL ---
+        # --- STEP C: SPATIAL DIVERGENCE ---
         div_X = np.zeros_like(u_dense)
         for d_idx in range(self.dimensions):
             div_X += np.gradient(X[d_idx], axis=d_idx)
             
-        # --- PASSO D: INTEGRAÇÃO DE POISSON ESPECTRAL ---
+        # --- STEP D: SPECTRAL POISSON INTEGRATION ---
+        # Convert divergence to Tensor Train and compute IDCT
         div_tt = TensorTrain.from_dense(div_X, eps=self.eps, max_rank=self.max_rank)
         hat_div_tt = div_tt.dct()
         
+        # Reconstruct multidimensional eigenvalues on the safe grid
         laplacian_eigenvalues_nd = np.zeros_like(u_dense)
         for d_idx in range(self.dimensions):
             slices = [np.newaxis] * self.dimensions
@@ -244,8 +251,9 @@ class SpectralHeatSolverND:
             
         laplacian_eigenvalues_nd_safe = np.copy(laplacian_eigenvalues_nd)
         zero_idx = tuple([0] * self.dimensions)
-        laplacian_eigenvalues_nd_safe[zero_idx] = 1.0
+        laplacian_eigenvalues_nd_safe[zero_idx] = 1.0  # Avoid division by zero
         
+        # Algebraic Poisson resolution in the compressed domain
         hat_div_dense = hat_div_tt.to_dense()
         hat_phi = hat_div_dense / laplacian_eigenvalues_nd_safe
         hat_phi[zero_idx] = 0.0
@@ -253,6 +261,7 @@ class SpectralHeatSolverND:
         phi_tt = TensorTrain.from_dense(hat_phi, eps=self.eps, max_rank=self.max_rank).idct()
         phi_dense = phi_tt.to_dense()
         
+        # Anchor potential to zero at source
         idx_origin = tuple(int(round(source_coord[d_idx])) for d_idx in range(self.dimensions))
         phi_dense -= phi_dense[idx_origin]
         phi_dense = np.maximum(phi_dense, 0.0)
@@ -260,6 +269,9 @@ class SpectralHeatSolverND:
         return TensorTrain.from_dense(phi_dense, eps=self.eps, max_rank=self.max_rank), idx_origin
 
     def interpolate_distances(self, phi_tt, target_coords):
+        """
+        Interpolates computed distances on the compressed Tensor Train back to points.
+        """
         phi_dense = phi_tt.to_dense()
         interp = RegularGridInterpolator(self.grids_1d, phi_dense, method='linear')
         return interp(target_coords)
