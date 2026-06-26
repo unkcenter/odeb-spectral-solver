@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "odeb-solver"
 version = "0.1.0"
 authors = [
-    { name = "UnK Center Inc.", email = "info@unkcenter.com" }
+    { name = "UnK Center Inc.", email = "unkcenter@proton.me" }
 ]
 description = "Spectral diffusion routing engine for low-memory environments and Edge Computing."
 readme = "README.md"
