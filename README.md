@@ -1,6 +1,10 @@
 # ODEB-TT-ESA: Spectral Diffusion Geodesic Solver
 Anisotropic Heat Method on Tensor-Compressed Manifolds
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://unk-odeb.streamlit.app)
+
+> **Live Web Demo:** [unk-odeb.streamlit.app](https://unk-odeb.streamlit.app)
+
 ODEB-TT-ESA is a high-performance, low-memory spectral routing engine designed for edge computing, autonomous robotics, and embedded systems. By reformulating discrete graph routing as an isotropic heat diffusion process on low-dimensional Riemannian manifolds, the algorithm bypasses the exponential complexity of traditional PDE grid solvers.
 
 This repository implements the 2D proof-of-concept utilizing Discrete Cosine Transforms (DCT-II) under Neumann boundary conditions to guarantee stable, leakage-free geodesic distances.
