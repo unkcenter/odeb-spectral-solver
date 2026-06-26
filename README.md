@@ -5,9 +5,9 @@ Anisotropic Heat Method on Tensor-Compressed Manifolds
 
 > **Live Web Demo:** [unk-odeb.streamlit.app](https://unk-odeb.streamlit.app)
 
-ODEB-TT-ESA is a high-performance, low-memory spectral routing engine designed for edge computing, autonomous robotics, and embedded systems. By reformulating discrete graph routing as an isotropic heat diffusion process on low-dimensional Riemannian manifolds, the algorithm bypasses the exponential complexity of traditional PDE grid solvers [1, 2].
+ODEB-TT-ESA is a high-performance, low-memory spectral routing engine designed for edge computing, autonomous robotics, and embedded systems. By reformulating discrete graph routing as an isotropic heat diffusion process on low-dimensional Riemannian manifolds, the algorithm bypasses the exponential complexity of traditional PDE grid solvers.
 
-This repository implements a fully generalized d-dimensional spectral geodesic solver operating entirely within the Tensor Train (TT) format to bypass the curse of dimensionality [4].
+This repository implements a fully generalized d-dimensional spectral geodesic solver operating entirely within the Tensor Train (TT) format to bypass the curse of dimensionality.
 
 ---
 
@@ -27,7 +27,7 @@ The core solver pipeline consists of four mathematically integrated stages:
 For high-dimensional grids ($d \approx 6$, $N_g = 100$), a traditional dense grid solver requires storing and processing $100^6 = 10^{12}$ points (approx. 8 TB VRAM).
 
 ODEB-TT-ESA bypasses this limitation utilizing the **Tensor Train (TT)** format:
-- **Memory Footprint:** Storage scales as $O(d \cdot k \cdot r^2)$ parameters. With a TT-rank $r \le 10$, memory consumption drops to approximately $60,000$ elements (**< 1 Megabyte**) [4].
+- **Memory Footprint:** Storage scales as $O(d \cdot k \cdot r^2)$ parameters. With a TT-rank $r \le 10$, memory consumption drops to approximately $60,000$ elements (**< 1 Megabyte**).
 - **Execution Speed:** Spectral transformations (TT-DCT) are applied separably over the individual tensor cores without decompression, reducing computational complexity to $O(d \cdot k \log k \cdot r^2)$ operations, making it highly suitable for ARM-based embedded processors.
 
 ---
