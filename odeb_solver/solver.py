@@ -35,7 +35,7 @@ class TensorTrain:
         d = len(shape)
         cores = []
         r_prev = 1
-        res = A.copy()
+        res = A # Evita cópia desnecessária para poupar RAM
         
         for m in range(d - 1):
             n_m = shape[m]
@@ -77,6 +77,27 @@ class TensorTrain:
             res = prod.reshape(new_shape)
         return np.squeeze(res, axis=(0, -1))
 
+    def get_slice(self, i0):
+        """
+        Natively extracts a (d-1)-dimensional slice at index i0 along the first axis
+        directly from the compressed cores, returning a new compressed TensorTrain.
+        """
+        v = self.cores[0][0, i0, :]
+        core1 = self.cores[1]
+        r1, n, r2 = core1.shape
+        new_core = np.tensordot(v, core1, axes=(0, 0)).reshape(1, n, r2)
+        sliced_cores = [new_core] + [core.copy() for core in self.cores[2:]]
+        return TensorTrain(sliced_cores)
+
+    def evaluate(self, coords):
+        """
+        Evaluates the Tensor Train potential at a single grid coordinate.
+        """
+        val = self.cores[0][0, int(round(coords[0])), :]
+        for d_idx in range(1, self.d):
+            val = val @ self.cores[d_idx][:, int(round(coords[d_idx])), :]
+        return val[0]
+
     def dct(self):
         """
         Applies a multi-dimensional DCT-II directly on the Tensor Train cores (TT-DCT).
@@ -115,6 +136,24 @@ class TensorTrain:
                 new_core = np.zeros((r1_l + r2_l, n_m, r1_r + r2_r))
                 new_core[:r1_l, :, :r1_r] = c1
                 new_core[r1_l:, :, r1_r:] = c2
+            new_cores.append(new_core)
+        return TensorTrain(new_cores)
+
+    def __mul__(self, other):
+        """
+        Element-wise product of two Tensor Train objects (TT-Kronecker contraction).
+        """
+        assert self.d == other.d
+        assert self.shape == other.shape
+        new_cores = []
+        for m in range(self.d):
+            core1 = self.cores[m]
+            core2 = other.cores[m]
+            r1_l, n_m, r1_r = core1.shape
+            r2_l, _, r2_r = core2.shape
+            
+            p = core1[:, None, :, :, None] * core2[None, :, :, None, :]
+            new_core = p.reshape(r1_l * r2_l, n_m, r1_r * r2_r)
             new_cores.append(new_core)
         return TensorTrain(new_cores)
 
@@ -186,11 +225,10 @@ class SpectralHeatSolverND:
 
     def solve_geodesic_distance(self, coords_grid, source_coord):
         """
-        Solves d-dimensional heat flow and Poisson equations using Sinc quadratures
-        and Tensor Train operations. Returns a compressed TensorTrain object.
+        Solves d-dimensional heat flow and Poisson equations natively in the
+        Tensor Train domain using a memory-friendly interleaved sliding window.
         """
         # --- STEP A: THERMAL DIFFUSION VIA SINC QUADRATURE (ESA) ---
-        # Discretization of Hackbusch's 1/x integral to solve heat flow separably
         h_sinc = 0.4
         M_sinc = 12
         quad_nodes = np.exp(np.arange(-M_sinc, M_sinc + 1) * h_sinc)
@@ -201,14 +239,12 @@ class SpectralHeatSolverND:
             w_j = quad_weights[j]
             s_j = quad_nodes[j]
             
-            # Construct rank-1 cores for each of the d dimensions
             cores_1d = []
             for d_idx in range(self.dimensions):
                 delta_1d = np.zeros(self.grid_res)
                 idx = int(round(source_coord[d_idx]))
                 delta_1d[idx] = 1.0
                 
-                # Solving 1D spectral heat diffusion damped by Sinc quadrature
                 hat_delta_1d = sfft.dct(delta_1d, norm='ortho')
                 hat_u_1d = hat_delta_1d * np.exp(s_j * self.t * self.laplacian_eigenvalues_1d)
                 u_1d = sfft.idct(hat_u_1d, norm='ortho')
@@ -218,60 +254,151 @@ class SpectralHeatSolverND:
             u_tt = term_tt if u_tt is None else u_tt + term_tt
             
         u_tt = u_tt.round(eps=self.eps, max_rank=self.max_rank)
-        u_dense = u_tt.to_dense()  # Reconstruction for local operations on moderate grids
-        u_dense = np.maximum(u_dense, 1e-15)
+
+        # --- STEPS B & C: SINGLE-PASS INTERLEAVED SLIDING WINDOW GRADIENT & DIVERGENCE ---
+        shape_slice = tuple(self.grid_res for _ in range(self.dimensions - 1))
+        div_X = np.zeros((self.grid_res,) + shape_slice, dtype=np.float32)
         
-        # --- STEP B: SPATIAL GRADIENT EXTRACTION AND NORMALIZATION ---
-        # Partial gradients along each of the d dimensions
-        gradients = np.gradient(u_dense)
-        grad_norm = np.zeros_like(u_dense)
-        for g in gradients:
-            grad_norm += g**2
-        grad_norm = np.sqrt(grad_norm + 1e-15)
+        u_slices = {}
+        X_0_slices = {}
+        div_internal_slices = {}
         
-        # Unit phase director vectors
-        X = [-g / grad_norm for g in gradients]
-        
-        # --- STEP C: SPATIAL DIVERGENCE ---
-        div_X = np.zeros_like(u_dense)
-        for d_idx in range(self.dimensions):
-            div_X += np.gradient(X[d_idx], axis=d_idx)
+        def get_u_slice(idx):
+            if idx < 0 or idx >= self.grid_res:
+                return None
+            if idx not in u_slices:
+                u_slices[idx] = u_tt.get_slice(idx).to_dense().astype(np.float32)
+            return u_slices[idx]
+
+        for j in range(self.grid_res + 2):
+            i = j - 1
             
-        # --- STEP D: SPECTRAL POISSON INTEGRATION ---
-        # Convert divergence to Tensor Train and compute IDCT
+            if 0 <= i < self.grid_res:
+                u_prev = get_u_slice(i - 1)
+                u_curr = get_u_slice(i)
+                u_next = get_u_slice(i + 1)
+                
+                if i == 0:
+                    grad_u_0 = u_next - u_curr
+                elif i == self.grid_res - 1:
+                    grad_u_0 = u_curr - u_prev
+                else:
+                    grad_u_0 = (u_next - u_prev) / 2.0
+                    
+                grad_u_k = []
+                for k in range(1, self.dimensions):
+                    g_k = np.gradient(u_curr, axis=k-1)
+                    grad_u_k.append(g_k)
+                    
+                norm_sq = grad_u_0**2
+                for g_k in grad_u_k:
+                    norm_sq += g_k**2
+                norm_i = np.sqrt(norm_sq + 1e-15)
+                
+                X_0_slices[i] = -grad_u_0 / norm_i
+                
+                div_internal = np.zeros_like(u_curr)
+                for k in range(1, self.dimensions):
+                    X_k = -grad_u_k[k-1] / norm_i
+                    div_internal += np.gradient(X_k, axis=k-1)
+                div_internal_slices[i] = div_internal
+                
+            target_i = j - 2
+            if 0 <= target_i < self.grid_res:
+                X0_prev = X_0_slices.get(target_i - 1)
+                X0_curr = X_0_slices.get(target_i)
+                X0_next = X_0_slices.get(target_i + 1)
+                
+                if target_i == 0:
+                    grad_X0_0 = X0_next - X0_curr
+                elif target_i == self.grid_res - 1:
+                    grad_X0_0 = X0_curr - X0_prev
+                else:
+                    grad_X0_0 = (X0_next - X0_prev) / 2.0
+                    
+                div_X[target_i] = div_internal_slices[target_i] + grad_X0_0
+                
+                if target_i - 1 in u_slices:
+                    del u_slices[target_i - 1]
+                if target_i - 1 in X_0_slices:
+                    del X_0_slices[target_i - 1]
+                if target_i in div_internal_slices:
+                    del div_internal_slices[target_i]
+
         div_tt = TensorTrain.from_dense(div_X, eps=self.eps, max_rank=self.max_rank)
+        del div_X
+        
+        # --- STEP D: SPECTRAL POISSON INTEGRATION ---
         hat_div_tt = div_tt.dct()
         
-        # Reconstruct multidimensional eigenvalues on the safe grid
-        laplacian_eigenvalues_nd = np.zeros_like(u_dense)
-        for d_idx in range(self.dimensions):
-            slices = [np.newaxis] * self.dimensions
-            slices[d_idx] = slice(None)
-            laplacian_eigenvalues_nd += self.laplacian_eigenvalues_1d[tuple(slices)]
+        hat_phi = np.zeros(hat_div_tt.shape, dtype=np.float32)
+        
+        lap_other = np.zeros(shape_slice, dtype=np.float32)
+        for d_idx in range(1, self.dimensions):
+            slices = [np.newaxis] * (self.dimensions - 1)
+            slices[d_idx - 1] = slice(None)
+            lap_other += self.laplacian_eigenvalues_1d[tuple(slices)].astype(np.float32)
             
-        laplacian_eigenvalues_nd_safe = np.copy(laplacian_eigenvalues_nd)
-        zero_idx = tuple([0] * self.dimensions)
-        laplacian_eigenvalues_nd_safe[zero_idx] = 1.0  # Avoid division by zero
-        
-        # Algebraic Poisson resolution in the compressed domain
-        hat_div_dense = hat_div_tt.to_dense()
-        hat_phi = hat_div_dense / laplacian_eigenvalues_nd_safe
-        hat_phi[zero_idx] = 0.0
-        
+        for i in range(self.grid_res):
+            hat_div_slice = hat_div_tt.get_slice(i).to_dense().astype(np.float32)
+            lap_slice = self.laplacian_eigenvalues_1d[i] + lap_other
+            
+            if i == 0:
+                lap_slice_safe = np.copy(lap_slice)
+                zero_idx_slice = tuple([0] * (self.dimensions - 1))
+                lap_slice_safe[zero_idx_slice] = 1.0
+                hat_phi_slice = hat_div_slice / lap_slice_safe
+                hat_phi_slice[zero_idx_slice] = 0.0
+            else:
+                hat_phi_slice = hat_div_slice / lap_slice
+                
+            hat_phi[i] = hat_phi_slice
+            
         phi_tt = TensorTrain.from_dense(hat_phi, eps=self.eps, max_rank=self.max_rank).idct()
-        phi_dense = phi_tt.to_dense()
+        del hat_phi
         
-        # Anchor potential to zero at source
+        phi_val_at_source = phi_tt.evaluate(source_coord)
+        
+        phi_dense_anchored = np.zeros(phi_tt.shape, dtype=np.float32)
+        for i in range(self.grid_res):
+            phi_slice = phi_tt.get_slice(i).to_dense().astype(np.float32)
+            phi_slice -= phi_val_at_source
+            phi_slice = np.maximum(phi_slice, 0.0)
+            phi_dense_anchored[i] = phi_slice
+            
+        phi_tt_final = TensorTrain.from_dense(phi_dense_anchored, eps=self.eps, max_rank=self.max_rank)
+        del phi_dense_anchored
+        
         idx_origin = tuple(int(round(source_coord[d_idx])) for d_idx in range(self.dimensions))
-        phi_dense -= phi_dense[idx_origin]
-        phi_dense = np.maximum(phi_dense, 0.0)
-        
-        return TensorTrain.from_dense(phi_dense, eps=self.eps, max_rank=self.max_rank), idx_origin
+        return phi_tt_final, idx_origin
 
     def interpolate_distances(self, phi_tt, target_coords):
         """
-        Interpolates computed distances on the compressed Tensor Train back to points.
+        Natively interpolates multi-dimensional continuous coordinates 
+        directly over the core matrices of the Tensor Train.
         """
-        phi_dense = phi_tt.to_dense()
-        interp = RegularGridInterpolator(self.grids_1d, phi_dense, method='linear')
-        return interp(target_coords)
+        results = []
+        for coord in target_coords:
+            val = None
+            for d_idx in range(self.dimensions):
+                y = coord[d_idx]
+                y_low = int(np.floor(y))
+                y_high = int(np.ceil(y))
+                
+                y_low = max(0, min(self.grid_res - 1, y_low))
+                y_high = max(0, min(self.grid_res - 1, y_high))
+                
+                weight = y - y_low if y_low != y_high else 0.0
+                
+                core = phi_tt.cores[d_idx]
+                core_low = core[:, y_low, :]
+                core_high = core[:, y_high, :]
+                
+                core_interp = (1.0 - weight) * core_low + weight * core_high
+                
+                if val is None:
+                    val = core_interp
+                else:
+                    val = val @ core_interp
+            results.append(val[0, 0])
+        return np.array(results)
