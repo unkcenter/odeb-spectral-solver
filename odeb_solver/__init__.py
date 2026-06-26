@@ -1,4 +1,4 @@
 from .embedding import BourgainMDSEmbedding
-from .solver import SpectralHeatSolver2D
+from .solver import SpectralHeatSolverND, TensorTrain
 
-__all__ = ["BourgainMDSEmbedding", "SpectralHeatSolver2D"]
+__all__ = ["BourgainMDSEmbedding", "SpectralHeatSolverND", "TensorTrain"]
